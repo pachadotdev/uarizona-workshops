@@ -1,0 +1,271 @@
+---
+title: A Crash Course on PostgreSQL for R Users
+subtitle: University of Arizona - RezBaz 2021
+authors: Mauricio "Pachá" Vargas S.
+date: 2020-05-18
+output:
+  xaringan::moon_reader:
+    lib_dir: libs
+    css: ["xaringan-themer.css"]
+    nature:
+      highlightStyle: github
+      highlightLines: true
+      countIncrementalSlides: false
+      slideNumberFormat: ""
+      ratio: 16:9
+---
+
+```{r xaringan-themer, include=FALSE, warning=FALSE}
+xaringanthemer::style_mono_dark()
+```
+
+# Motivation
+
+* If you have your workflows that are well organized, and still you create a lot of CSV or RDS files to share periodical data then you can benefit from using PostgreSQL.
+* PostgreSQL and MariaDB are the database engines that I like, but this still applies to MySQL and even to propietary databases such as Oracle Database or SQL Server.
+* Big disclaimer: Oracle Database and SQL Server are going to be much harder to configure!
+
+---
+
+# Create your own Postres server !
+
+* Create a 1GB RAM + 25GB disk VPS by using the [Supabase Postgres Image](https://marketplace.digitalocean.com/apps/supabase-postgres) from Digital Ocean Marketplace. 
+* You can even explore the code on [GitHub](https://github.com/supabase/postgres/).
+* If you don't have an account on DigitalOcean, use my [referral link](https://m.do.co/c/6119f0430dad) to have free credits.
+
+---
+
+# Nycflights13
+
+* Assume that you work at NYC airport and you are in charge of updating the `flights` table every day.
+* Instead of creating one CSV file per day with flight records, the process can be better organized by appending new records to an existing SQL table.
+
+---
+
+Let's start with the `flights` table from the quite popular `nycflights13` package:
+```{r,eval=TRUE}
+library(nycflights13)
+flights
+```
+
+---
+
+* `nycflights13` provides different tables besides `flights`
+* You can explore the details in the superb book [R4DS](https://r4ds.had.co.nz/relational-data.html).
+
+---
+
+# SQL indexes
+
+* *Skipping a lot of details.*
+* SQL creates copies of the tables that contain just a few columns which help to identify observations.
+* This is done in order to be able to filter those observations in a faster way that without an index.
+
+---
+
+For example, in the `month` table, the year column is really useful to create an index that boosts the speed of SQL operations similar to this `dplyr` statement:
+```{r, eval=FALSE}
+library(dplyr)
+flights %>% filter(month == 3)
+```
+
+---
+
+To create indexes, let's start differentiating between unique and non-unique indexes:
+```{r}
+unique_index <- list(
+    airlines = list("carrier"),
+    planes = list("tailnum")
+  )
+
+index <- list(
+    airports = list("faa"),
+    flights = list(
+      c("year", "month", "day"), "carrier", "tailnum", "origin", "dest"
+    ),
+    weather = list(c("year", "month", "day"), "origin")
+  )
+```
+
+---
+
+# SQL connections
+
+* We need at least this information in order to connect to a Postgres database:
+  * DB name: `postgres`
+  * DB host: `123.456.789`
+  * DB user: `postgres`
+  * DB password: `S4cr3tP4ssw0rd007`
+  * DB port: `5432`.
+  
+---
+
+* Databases information such as passwords should be stored in your `~/.Rprofile` and **never** in your scripts! 
+* You can type `usethis::edit_r_environ()` and edit your R profile to add the credentials and then restart your R session to apply the changes.
+
+---
+
+To access and start creating tables to better organize your data, you need to open and close connections, and the `RPostgres` package is really useful to do that and more:
+
+```{r, eval = FALSE}
+library(RPostgres)
+
+fun_connect <- function() {
+  dbConnect(
+    Postgres(),
+    dbname = Sys.getenv("tutorial_db"),
+    user = Sys.getenv("tutorial_user"),
+    password = Sys.getenv("tutorial_pass"),
+    host = Sys.getenv("tutorial_host")
+  )
+}
+```
+
+---
+
+By default, PostgreSQL uses the `public` schema in a databases, which you'll write to. You can explore the existing tables in the `public` schema of `postgres` database by running:
+
+```{r ,eval = FALSE}
+schema <- "public"
+
+conn <- fun_connect()
+remote_tables <- dbGetQuery(
+  conn,
+  sprintf("SELECT table_name 
+          FROM information_schema.tables 
+          WHERE table_schema='%s'", schema)
+)
+dbDisconnect(conn)
+
+remote_tables <- as.character(remote_tables$table_name)
+remote_tables
+```
+
+Because this is an example with a freshly created server just for the tutorial, the result is no existing tables in the database.
+
+---
+
+# Creating tables
+
+Now you should be ready to start writing the tables from `nycflights13` to the database:
+
+```{r, eval = FALSE}
+local_tables <- utils::data(package = "nycflights13")$results[, "Item"]
+tables <- setdiff(local_tables, remote_tables)
+
+for (table in tables) {
+  df <- getExportedValue("nycflights13", table)
+  message("Creating table: ", table)
+  table_name <- table
+  conn <- fun_connect()
+  copy_to(
+    conn, df, table_name,
+    unique_indexes = unique_index[[table]], indexes = index[[table]], temporary = FALSE
+  )
+  dbDisconnect(conn)
+}
+```
+
+This approach prevents errors in case that a table already exists. Also, it prevents a bigger error that would be to overwrite an existing table instead of appending new observations.
+
+---
+
+# Accessing tables
+
+You can use `dplyr` in a very similar way to what you would do with a local `data.frame`. Let's say you need to count the observations per month and save the result locally:
+
+```{r, eval = FALSE}
+conn <- fun_connect()
+obs_per_month <- tbl(conn, "flights") %>% 
+  group_by(year, month) %>% 
+  count() %>% 
+  collect()
+dbDisconnect(conn)
+
+obs_per_month
+```
+
+---
+
+* The previous chunk uses the `collect()` function, which stores the result of the query as a local `data.frame`, which can be used with `ggplot2`, saved as CSV with `readr`, etc.
+* We even fit a regression with this data!
+
+---
+
+# Appending new records
+
+Let's say you have a table `flights14` with records for the year 2014. To append those records to the existing `flights` table in the database, you need to run:
+
+```{r, eval=FALSE}
+conn <- fun_connect()
+dbWriteTable(conn, "flights", flights14, append = TRUE, overwrite = FALSE, row.names = FALSE)
+dbDisconnect(conn)
+```
+
+---
+
+# Appending large tables
+
+Let's say your `flights14` contains 12,345,678 rows. A better approach than writing the full table at once is to divide it in parts of 2,500,000 rows (or other smaller number).
+
+---
+
+## Using base R
+
+```{r, eval=FALSE}
+N <- 2500000
+divisions <- seq(N, N * ((nrow(flights14) %/% N) + 1), by =  N)
+    
+flights14_2 <- list()
+    
+for (j in seq_along(divisions)) {
+  if (j == 1) {
+    flights14_2[[j]] <- flights14[1:divisions[j],]
+  } else {
+    flights14_2[[j]] <- flights14[(divisions[j-1] + 1):divisions[j]]
+  }
+}
+    
+rm(flights14)
+    
+for (j in seq_along(divisions)) {
+  message(sprintf("Writing fragment %s of %s", j, length(divisions)))
+  conn <- fun_connect()
+  dbWriteTable(conn, "flights", flights14_2[[j]],
+    append = TRUE, overwrite = FALSE, row.names = FALSE)
+  dbDisconnect(conn)
+}
+```
+
+---
+
+## Using the Tidyverse
+
+```{r, eval=FALSE}
+library(tidyverse)
+
+N <- 2500000
+
+flights14 <- flights14 %>%
+  mutate(p = floor(row_number() / N) + 1) %>% 
+  group_by(p) %>% 
+  nest() %>% 
+  ungroup() %>% 
+  select(data) %>% 
+  pull()
+
+map(
+  seq_along(flights14),
+  function(x) {
+    message(sprintf("Writing fragment %s of %s", x, length(flights14)))
+    conn <- fun_connect()
+    dbWriteTable(conn, "flights", flights14_2[[x]],
+      append = TRUE, overwrite = FALSE, row.names = FALSE)
+    dbDisconnect(conn)
+  }
+)
+```
+
+---
+
+# Questions?

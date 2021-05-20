@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="" xml:lang="">
+  <head>
+    <title>A Crash Course on PostgreSQL for R Users</title>
+    <meta charset="utf-8" />
+    <meta name="date" content="2020-05-18" />
+    <script src="libs/header-attrs-2.8/header-attrs.js"></script>
+    <link rel="stylesheet" href="xaringan-themer.css" type="text/css" />
+  </head>
+  <body>
+    <textarea id="source">
+class: center, middle, inverse, title-slide
+
+# A Crash Course on PostgreSQL for R Users
+## University of Arizona - RezBaz 2021
+### 2020-05-18
+
+---
+
+
+
+
+# Motivation
+
+* If you have your workflows that are well organized, and still you create a lot of CSV or RDS files to share periodical data then you can benefit from using PostgreSQL.
+* PostgreSQL and MariaDB are the database engines that I like, but this still applies to MySQL and even to propietary databases such as Oracle Database or SQL Server.
+* Big disclaimer: Oracle Database and SQL Server are going to be much harder to configure!
+
+---
+
+# Create your own Postres server !
+
+* Create a 1GB RAM + 25GB disk VPS by using the [Supabase Postgres Image](https://marketplace.digitalocean.com/apps/supabase-postgres) from Digital Ocean Marketplace. 
+* You can even explore the code on [GitHub](https://github.com/supabase/postgres/).
+* If you don't have an account on DigitalOcean, use my [referral link](https://m.do.co/c/6119f0430dad) to have free credits.
+
+---
+
+# Nycflights13
+
+* Assume that you work at NYC airport and you are in charge of updating the `flights` table every day.
+* Instead of creating one CSV file per day with flight records, the process can be better organized by appending new records to an existing SQL table.
+
+---
+
+Let's start with the `flights` table from the quite popular `nycflights13` package:
+
+```r
+library(nycflights13)
+flights
+```
+
+```
+## # A tibble: 336,776 x 19
+##     year month   day dep_time sched_dep_time dep_delay arr_time sched_arr_time
+##    &lt;int&gt; &lt;int&gt; &lt;int&gt;    &lt;int&gt;          &lt;int&gt;     &lt;dbl&gt;    &lt;int&gt;          &lt;int&gt;
+##  1  2013     1     1      517            515         2      830            819
+##  2  2013     1     1      533            529         4      850            830
+##  3  2013     1     1      542            540         2      923            850
+##  4  2013     1     1      544            545        -1     1004           1022
+##  5  2013     1     1      554            600        -6      812            837
+##  6  2013     1     1      554            558        -4      740            728
+##  7  2013     1     1      555            600        -5      913            854
+##  8  2013     1     1      557            600        -3      709            723
+##  9  2013     1     1      557            600        -3      838            846
+## 10  2013     1     1      558            600        -2      753            745
+## # … with 336,766 more rows, and 11 more variables: arr_delay &lt;dbl&gt;,
+## #   carrier &lt;chr&gt;, flight &lt;int&gt;, tailnum &lt;chr&gt;, origin &lt;chr&gt;, dest &lt;chr&gt;,
+## #   air_time &lt;dbl&gt;, distance &lt;dbl&gt;, hour &lt;dbl&gt;, minute &lt;dbl&gt;, time_hour &lt;dttm&gt;
+```
+
+---
+
+* `nycflights13` provides different tables besides `flights`
+* You can explore the details in the superb book [R4DS](https://r4ds.had.co.nz/relational-data.html).
+
+---
+
+# SQL indexes
+
+* *Skipping a lot of details.*
+* SQL creates copies of the tables that contain just a few columns which help to identify observations.
+* This is done in order to be able to filter those observations in a faster way that without an index.
+
+---
+
+For example, in the `month` table, the year column is really useful to create an index that boosts the speed of SQL operations similar to this `dplyr` statement:
+
+```r
+flights %&gt;% filter(month == 3)
+```
+
+---
+
+To create indexes, let's start differentiating between unique and non-unique indexes:
+
+```r
+unique_index &lt;- list(
+    airlines = list("carrier"),
+    planes = list("tailnum")
+  )
+
+index &lt;- list(
+    airports = list("faa"),
+    flights = list(
+      c("year", "month", "day"), "carrier", "tailnum", "origin", "dest"
+    ),
+    weather = list(c("year", "month", "day"), "origin")
+  )
+```
+
+---
+
+# SQL connections
+
+* We need at least this information in order to connect to a Postgres database:
+  * DB name: `postgres`
+  * DB host: `123.456.789`
+  * DB user: `postgres`
+  * DB password: `S4cr3tP4ssw0rd007`
+  * DB port: `5432`.
+  
+---
+
+* Databases information such as passwords should be stored in your `~/.Rprofile` and **never** in your scripts! 
+* You can type `usethis::edit_r_environ()` and edit your R profile to add the credentials and then restart your R session to apply the changes.
+
+---
+
+To access and start creating tables to better organize your data, you need to open and close connections, and the `RPostgres` package is really useful to do that and more:
+
+
+```r
+library(RPostgres)
+library(dplyr)
+
+fun_connect &lt;- function() {
+  dbConnect(
+    Postgres(),
+    dbname = Sys.getenv("tutorial_db"),
+    user = Sys.getenv("tutorial_user"),
+    password = Sys.getenv("tutorial_pass"),
+    host = Sys.getenv("tutorial_host")
+  )
+}
+```
+
+---
+
+By default, PostgreSQL uses the `public` schema in a databases, which you'll write to. You can explore the existing tables in the `public` schema of `postgres` database by running:
+
+
+```r
+schema &lt;- "public"
+
+conn &lt;- fun_connect()
+remote_tables &lt;- dbGetQuery(
+  conn,
+  sprintf("SELECT table_name 
+          FROM information_schema.tables 
+          WHERE table_schema='%s'", schema)
+)
+dbDisconnect(conn)
+
+remote_tables &lt;- as.character(remote_tables$table_name)
+remote_tables
+```
+
+Because this is an example with a freshly created server just for the tutorial, the result is no existing tables in the database.
+
+---
+
+# Creating tables
+
+Now you should be ready to start writing the tables from `nycflights13` to the database:
+
+
+```r
+local_tables &lt;- utils::data(package = "nycflights13")$results[, "Item"]
+tables &lt;- setdiff(local_tables, remote_tables)
+
+for (table in tables) {
+  df &lt;- getExportedValue("nycflights13", table)
+  message("Creating table: ", table)
+  table_name &lt;- table
+  conn &lt;- fun_connect()
+  copy_to(
+    conn, df, table_name,
+    unique_indexes = unique_index[[table]], indexes = index[[table]], temporary = FALSE
+  )
+  dbDisconnect(conn)
+}
+```
+
+This approach prevents errors in case that a table already exists. Also, it prevents a bigger error that would be to overwrite an existing table instead of appending new observations.
+
+---
+
+# Accessing tables
+
+You can use `dplyr` in a very similar way to what you would do with a local `data.frame`. Let's say you need to count the observations per month and save the result locally:
+
+
+```r
+library(dplyr)
+
+conn &lt;- fun_connect()
+obs_per_month &lt;- tbl(conn, "flights") %&gt;% 
+  group_by(year, month) %&gt;% 
+  count() %&gt;% 
+  collect()
+dbDisconnect(conn)
+
+obs_per_month
+```
+
+---
+
+* The previous chunk uses the `collect()` function, which stores the result of the query as a local `data.frame`, which can be used with `ggplot2`, saved as CSV with `readr`, etc.
+* We even fit a regression with this data!
+
+---
+
+# Appending new records
+
+Let's say you have a table `flights14` with records for the year 2014. To append those records to the existing `flights` table in the database, you need to run:
+
+
+```r
+conn &lt;- fun_connect()
+dbWriteTable(conn, "flights", flights14, append = TRUE, overwrite = FALSE, row.names = FALSE)
+dbDisconnect(conn)
+```
+
+---
+
+# Appending large tables
+
+Let's say your `flights14` contains 12,345,678 rows. A better approach than writing the full table at once is to divide it in parts of 2,500,000 rows (or other smaller number).
+
+---
+
+## Using base R
+
+
+```r
+N &lt;- 2500000
+divisions &lt;- seq(N, N * ((nrow(flights14) %/% N) + 1), by =  N)
+    
+flights14_2 &lt;- list()
+    
+for (j in seq_along(divisions)) {
+  if (j == 1) {
+    flights14_2[[j]] &lt;- flights14[1:divisions[j],]
+  } else {
+    flights14_2[[j]] &lt;- flights14[(divisions[j-1] + 1):divisions[j]]
+  }
+}
+    
+rm(flights14)
+    
+for (j in seq_along(divisions)) {
+  message(sprintf("Writing fragment %s of %s", j, length(divisions)))
+  conn &lt;- fun_connect()
+  dbWriteTable(conn, "flights", flights14_2[[j]],
+    append = TRUE, overwrite = FALSE, row.names = FALSE)
+  dbDisconnect(conn)
+}
+```
+
+---
+
+## Using the Tidyverse
+
+
+```r
+library(tidyverse)
+
+N &lt;- 2500000
+
+flights14 &lt;- flights14 %&gt;%
+  mutate(p = floor(row_number() / N) + 1) %&gt;% 
+  group_by(p) %&gt;% 
+  nest() %&gt;% 
+  ungroup() %&gt;% 
+  select(data) %&gt;% 
+  pull()
+
+map(
+  seq_along(flights14),
+  function(x) {
+    message(sprintf("Writing fragment %s of %s", x, length(flights14)))
+    conn &lt;- fun_connect()
+    dbWriteTable(conn, "flights", flights14_2[[x]],
+      append = TRUE, overwrite = FALSE, row.names = FALSE)
+    dbDisconnect(conn)
+  }
+)
+```
+
+---
+
+# Questions?
+    </textarea>
+<style data-target="print-only">@media screen {.remark-slide-container{display:block;}.remark-slide-scaler{box-shadow:none;}}</style>
+<script src="https://remarkjs.com/downloads/remark-latest.min.js"></script>
+<script>var slideshow = remark.create({
+"highlightStyle": "github",
+"highlightLines": true,
+"countIncrementalSlides": false,
+"slideNumberFormat": "",
+"ratio": "16:9"
+});
+if (window.HTMLWidgets) slideshow.on('afterShowSlide', function (slide) {
+  window.dispatchEvent(new Event('resize'));
+});
+(function(d) {
+  var s = d.createElement("style"), r = d.querySelector(".remark-slide-scaler");
+  if (!r) return;
+  s.type = "text/css"; s.innerHTML = "@page {size: " + r.style.width + " " + r.style.height +"; }";
+  d.head.appendChild(s);
+})(document);
+
+(function(d) {
+  var el = d.getElementsByClassName("remark-slides-area");
+  if (!el) return;
+  var slide, slides = slideshow.getSlides(), els = el[0].children;
+  for (var i = 1; i < slides.length; i++) {
+    slide = slides[i];
+    if (slide.properties.continued === "true" || slide.properties.count === "false") {
+      els[i - 1].className += ' has-continuation';
+    }
+  }
+  var s = d.createElement("style");
+  s.type = "text/css"; s.innerHTML = "@media print { .has-continuation { display: none; } }";
+  d.head.appendChild(s);
+})(document);
+// delete the temporary CSS (for displaying all slides initially) when the user
+// starts to view slides
+(function() {
+  var deleted = false;
+  slideshow.on('beforeShowSlide', function(slide) {
+    if (deleted) return;
+    var sheets = document.styleSheets, node;
+    for (var i = 0; i < sheets.length; i++) {
+      node = sheets[i].ownerNode;
+      if (node.dataset["target"] !== "print-only") continue;
+      node.parentNode.removeChild(node);
+    }
+    deleted = true;
+  });
+})();
+(function() {
+  "use strict"
+  // Replace <script> tags in slides area to make them executable
+  var scripts = document.querySelectorAll(
+    '.remark-slides-area .remark-slide-container script'
+  );
+  if (!scripts.length) return;
+  for (var i = 0; i < scripts.length; i++) {
+    var s = document.createElement('script');
+    var code = document.createTextNode(scripts[i].textContent);
+    s.appendChild(code);
+    var scriptAttrs = scripts[i].attributes;
+    for (var j = 0; j < scriptAttrs.length; j++) {
+      s.setAttribute(scriptAttrs[j].name, scriptAttrs[j].value);
+    }
+    scripts[i].parentElement.replaceChild(s, scripts[i]);
+  }
+})();
+(function() {
+  var links = document.getElementsByTagName('a');
+  for (var i = 0; i < links.length; i++) {
+    if (/^(https?:)?\/\//.test(links[i].getAttribute('href'))) {
+      links[i].target = '_blank';
+    }
+  }
+})();
+// adds .remark-code-has-line-highlighted class to <pre> parent elements
+// of code chunks containing highlighted lines with class .remark-code-line-highlighted
+(function(d) {
+  const hlines = d.querySelectorAll('.remark-code-line-highlighted');
+  const preParents = [];
+  const findPreParent = function(line, p = 0) {
+    if (p > 1) return null; // traverse up no further than grandparent
+    const el = line.parentElement;
+    return el.tagName === "PRE" ? el : findPreParent(el, ++p);
+  };
+
+  for (let line of hlines) {
+    let pre = findPreParent(line);
+    if (pre && !preParents.includes(pre)) preParents.push(pre);
+  }
+  preParents.forEach(p => p.classList.add("remark-code-has-line-highlighted"));
+})(document);</script>
+
+<script>
+slideshow._releaseMath = function(el) {
+  var i, text, code, codes = el.getElementsByTagName('code');
+  for (i = 0; i < codes.length;) {
+    code = codes[i];
+    if (code.parentNode.tagName !== 'PRE' && code.childElementCount === 0) {
+      text = code.textContent;
+      if (/^\\\((.|\s)+\\\)$/.test(text) || /^\\\[(.|\s)+\\\]$/.test(text) ||
+          /^\$\$(.|\s)+\$\$$/.test(text) ||
+          /^\\begin\{([^}]+)\}(.|\s)+\\end\{[^}]+\}$/.test(text)) {
+        code.outerHTML = code.innerHTML;  // remove <code></code>
+        continue;
+      }
+    }
+    i++;
+  }
+};
+slideshow._releaseMath(document);
+</script>
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+(function () {
+  var script = document.createElement('script');
+  script.type = 'text/javascript';
+  script.src  = 'https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-MML-AM_CHTML';
+  if (location.protocol !== 'file:' && /^https?:/.test(script.src))
+    script.src  = script.src.replace(/^https?:/, '');
+  document.getElementsByTagName('head')[0].appendChild(script);
+})();
+</script>
+  </body>
+</html>
