@@ -87,6 +87,7 @@ flights
 For example, in the `month` table, the year column is really useful to create an index that boosts the speed of SQL operations similar to this `dplyr` statement:
 
 ```r
+library(dplyr)
 flights %&gt;% filter(month == 3)
 ```
 
@@ -132,7 +133,6 @@ To access and start creating tables to better organize your data, you need to op
 
 ```r
 library(RPostgres)
-library(dplyr)
 
 fun_connect &lt;- function() {
   dbConnect(
@@ -202,8 +202,6 @@ You can use `dplyr` in a very similar way to what you would do with a local `dat
 
 
 ```r
-library(dplyr)
-
 conn &lt;- fun_connect()
 obs_per_month &lt;- tbl(conn, "flights") %&gt;% 
   group_by(year, month) %&gt;% 
